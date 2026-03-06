@@ -2,8 +2,17 @@ import streamlit as st
 from functions_for_pipeline import *
 import streamlit.components.v1 as components
 import mlflow
+from mlflow import langchain
 import tempfile
 from pyvis.network import Network
+
+
+langchain.autolog()  
+# Specify the tracking URI for the MLflow server.
+mlflow.set_tracking_uri("http://localhost:5000")
+# Specify the experiment you just created for your GenAI application.
+mlflow.set_experiment("Sophisticated Agent Experiment")
+
 
 def create_network_graph(current_state):
     """
@@ -81,6 +90,7 @@ def save_and_display_graph(net):
     with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
         net.write_html(tmp_file.name,notebook=True)
         tmp_file.flush()
+        mlflow.log_artifact(tmp_file.name, artifact_path="network_graphs")
         with open(tmp_file.name, "r", encoding="utf-8") as f:
             html_content = f.read()
             return html_content
@@ -153,6 +163,8 @@ def execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, gra
             count_step += 1
             for step, agent_state_value in plan_output.items():
                 print(f"Step: {step}, Agent State Value: {agent_state_value}")
+                mlflow.log_metric("steps_executed", count_step)
+                mlflow.log_text(str(agent_state_value), artifact_file=f"step_{count_step}_state.txt")
                 previous_values, previous_state = updates_placeholders_and_graph(agent_state_value, placeholders, graph_placeholder, previous_values, previous_state)
                 progress_bar.progress(count_step/recurtion_limit)
                 if count_step >= recurtion_limit:
@@ -201,8 +213,12 @@ def main():
             "past_steps": col2.empty(),
             "aggregated_context": col3.empty()
         }
-        
-        response = execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, graph_placeholder, recurtion_limit=45)
+        with mlflow.start_run(run_name="Sophisticated Agent Execution"):
+            mlflow.log_param("question", question)
+            response = execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, graph_placeholder, recurtion_limit=45)
+            mlflow.log_text(response, artifact_file="final_response.txt")
+            
+            
         st.write("**Final Answer:**")
         st.write(response)
         
