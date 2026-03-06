@@ -55,7 +55,7 @@ def keep_only_relevant_context_chain():
     class KeepReleventContext(BaseModel):
         relevant_content:str = Field(description="The relevant content from the retrieved documents that is relevant to the query.")
     
-    keep_only_relevant_context_prompt = PromptTemplate.from_template(template=only_relevant_context_prompt_template,              input_variables=["query", "retrieved_docs"])
+    keep_only_relevant_context_prompt = PromptTemplate(template=only_relevant_context_prompt_template, input_variables=["query", "retrieved_docs"])
     keep_only_relevent_context_llm = ChatOpenAI(
         model="openai/gpt-4.1",
         base_url="https://models.github.ai/inference"
@@ -516,6 +516,7 @@ def create_qualitative_answer_workflow_app():
     return qualitative_answer_workflow_app
 
 
+import mlflow
 class PlanExecute(TypedDict):
     curr_state: str
     question: str
@@ -751,7 +752,7 @@ replanner = create_replanner_chain()
 anonymize_question_chain = create_anonymize_question_chain()
 can_be_answered_already_chain = create_can_be_answered_already_chain()
 
-
+@mlflow.trace(span_type="task_handler_chain")
 def run_task_handler_chain(state: PlanExecute):
     """ Run the task handler chain to decide which tool to use to execute the task.
     Args:
@@ -802,7 +803,7 @@ def run_task_handler_chain(state: PlanExecute):
     return state  
 
 
-
+@mlflow.trace(span_type="retrieve_or_answer")
 def retrieve_or_answer(state: PlanExecute):
     """Decide whether to retrieve or answer the question based on the current state.
     Args:
@@ -824,7 +825,7 @@ def retrieve_or_answer(state: PlanExecute):
         raise ValueError("Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'")  
 
 
-
+@mlflow.trace(span_type="qualitative_chunks_retrieval_workflow")
 def run_qualitative_chunks_retrieval_workflow(state):
     """
     Run the qualitative chunks retrieval workflow.
@@ -846,6 +847,7 @@ def run_qualitative_chunks_retrieval_workflow(state):
     state["aggregated_context"] += output['relevant_context']
     return state
 
+@mlflow.trace(span_type="qualitative_summaries_retrieval_workflow")
 def run_qualitative_summaries_retrieval_workflow(state):
     """
     Run the qualitative summaries retrieval workflow.
@@ -867,6 +869,8 @@ def run_qualitative_summaries_retrieval_workflow(state):
     state["aggregated_context"] += output['relevant_context']
     return state
 
+
+@mlflow.trace(span_type="qualitative_book_quotes_retrieval_workflow")
 def run_qualitative_book_quotes_retrieval_workflow(state):
     """
     Run the qualitative book quotes retrieval workflow.
@@ -889,7 +893,7 @@ def run_qualitative_book_quotes_retrieval_workflow(state):
     return state
    
 
-
+@mlflow.trace(span_type="qualitative_answer_workflow")
 def run_qualtative_answer_workflow(state):
     """
     Run the qualitative answer workflow.
@@ -912,6 +916,8 @@ def run_qualtative_answer_workflow(state):
     state["aggregated_context"] += output["answer"]
     return state
 
+
+@mlflow.trace(span_type="qualitative_answer_workflow_for_final_answer")
 def run_qualtative_answer_workflow_for_final_answer(state):
     """
     Run the qualitative answer workflow for the final answer.
@@ -932,7 +938,7 @@ def run_qualtative_answer_workflow_for_final_answer(state):
     state["response"] = value
     return state
 
-
+@mlflow.trace(span_type="anonymize_queries")
 def anonymize_queries(state: PlanExecute):
     """
     Anonymizes the question.
@@ -956,7 +962,7 @@ def anonymize_queries(state: PlanExecute):
     state["mapping"] = mapping
     return state
 
-
+@mlflow.trace(span_type="deanonymize_queries")
 def deanonymize_queries(state: PlanExecute):
     """
     De-anonymizes the plan.
@@ -974,6 +980,7 @@ def deanonymize_queries(state: PlanExecute):
     return state
 
 
+@mlflow.trace(span_type="plan_step")
 def plan_step(state: PlanExecute):
     """
     Plans the next step.
@@ -990,7 +997,7 @@ def plan_step(state: PlanExecute):
     print(f'plan: {state["plan"]}')
     return state
 
-
+@mlflow.trace(span_type="break_down_plan_step")
 def break_down_plan_step(state: PlanExecute):
     """
     Breaks down the plan steps into retrievable or answerable tasks.
@@ -1054,7 +1061,7 @@ def can_be_answered(state: PlanExecute):
         return "cannot_be_answered_yet"
 
 
-
+@mlflow.trace(name="create_agent")
 def create_agent():
     
     agent_workflow = StateGraph(PlanExecute)
