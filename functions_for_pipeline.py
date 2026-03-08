@@ -713,6 +713,7 @@ def create_deanonymize_plan_chain():
         template=de_anonymize_plan_prompt_template,
         input_variables=["plan", "mapping"],
     )
+    
 
     de_anonymize_plan_llm = ChatOpenAI(model="openai/gpt-4.1", temperature=0, base_url="https://models.github.ai/inference")
     de_anonymize_plan_chain = de_anonymize_plan_prompt | de_anonymize_plan_llm.with_structured_output(DeAnonymizePlan)
@@ -842,7 +843,7 @@ def run_qualitative_chunks_retrieval_workflow(state):
         for _, _ in output.items():
             pass 
         print("--------------------")
-    if not state["aggregated_context"]:
+    if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
     state["aggregated_context"] += output['relevant_context']
     return state
@@ -864,7 +865,7 @@ def run_qualitative_summaries_retrieval_workflow(state):
         for _, _ in output.items():
             pass 
         print("--------------------")
-    if not state["aggregated_context"]:
+    if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
     state["aggregated_context"] += output['relevant_context']
     return state
@@ -887,7 +888,7 @@ def run_qualitative_book_quotes_retrieval_workflow(state):
         for _, _ in output.items():
             pass 
         print("--------------------")
-    if not state["aggregated_context"]:
+    if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
     state["aggregated_context"] += output['relevant_context']
     return state
@@ -911,7 +912,7 @@ def run_qualtative_answer_workflow(state):
         for _, _ in output.items():
             pass 
         print("--------------------")
-    if not state["aggregated_context"]:
+    if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
     state["aggregated_context"] += output["answer"]
     return state
