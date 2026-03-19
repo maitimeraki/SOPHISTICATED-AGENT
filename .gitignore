@@ -1,0 +1,17 @@
+mlflow.db
+.qodo
+__pycache__/
+*.pyc
+*.pyo
+*.pyd
+.Python
+.env
+venv/
+mlartifacts/
+logs/
+*.log
+*.csv
+*.json
+*.h5
+lib/
+bin/
