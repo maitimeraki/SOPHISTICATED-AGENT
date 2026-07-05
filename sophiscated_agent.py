@@ -5,9 +5,22 @@ import mlflow
 from mlflow import langchain
 import tempfile
 from pyvis.network import Network
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+    handlers=[
+        logging.FileHandler('./logs/sophiscated_agent.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 
-langchain.autolog()  
+langchain.autolog()
+logger.info("LangChain autolog enabled")  
 # Specify the tracking URI for the MLflow server.
 mlflow.set_tracking_uri("http://localhost:5000")
 # Specify the experiment you just created for your GenAI application.
@@ -24,9 +37,12 @@ def create_network_graph(current_state):
     Returns:
         Network: The network graph visualization.
     """
-    net = Network(directed=True, notebook=True, height="300px", width="100%")
-    net.toggle_physics(False) # Disable physics for better layout
-    nodes = [
+    try:
+        logger.debug(f"create_network_graph called with current_state: {current_state}")
+        net = Network(directed=True, notebook=True, height="300px", width="100%")
+        logger.debug("Created Network object")
+        net.toggle_physics(False) # Disable physics for better layout
+        nodes = [
         {"id": "anonymize_question", "label": "anonymize_question", "x": 0, "y": 0},
         {"id": "planner", "label": "planner", "x": 175*1.75, "y": -100},
         {"id": "de_anonymize_plan", "label": "de_anonymize_plan", "x": 350*1.75, "y": -100},
@@ -40,32 +56,43 @@ def create_network_graph(current_state):
         {"id": "can_be_answered_already", "label": "can_be_answered_already", "x": 1225*1.75, "y": 0},
         {"id": "get_final_answer", "label": "get_final_answer", "x": 1400*1.75, "y": 0}
     ]
-    edges = [
-        ("anonymize_question", "planner"),
-        ("planner", "de_anonymize_plan"),
-        ("de_anonymize_plan", "break_down_plan"),
-        ("break_down_plan", "task_handler"),
-        ("task_handler", "retrieve_chunks"),
-        ("task_handler", "retrieve_summaries"),
-        ("task_handler", "retrieve_book_quotes"),
-        ("task_handler", "answer"),
-        ("retrieve_chunks", "replan"),
-        ("retrieve_summaries", "replan"),
-        ("retrieve_book_quotes", "replan"),
-        ("answer", "replan"),
-        ("replan", "can_be_answered_already"),
-        ("replan", "break_down_plan"),
-        ("can_be_answered_already", "get_final_answer")
-    ]
-    for node in nodes:
-        color= "#00FF00" if node["id"] == current_state else "#FF69B4"  # Green if current, else pink
-        net.add_node(node["id"], label=node["label"], color=color, x=node["x"], y=node["y"], physics=False)
-    # Add edges with a default color
-    for edge in edges:
-        net.add_edge(edge[0], edge[1], color="#808080")  # Set edge color to gray
-        
-    net.options.edges.smooth.type = "straight" # Set edges to straight lines
-    return net
+        edges = [
+            ("anonymize_question", "planner"),
+            ("planner", "de_anonymize_plan"),
+            ("de_anonymize_plan", "break_down_plan"),
+            ("break_down_plan", "task_handler"),
+            ("task_handler", "retrieve_chunks"),
+            ("task_handler", "retrieve_summaries"),
+            ("task_handler", "retrieve_book_quotes"),
+            ("task_handler", "answer"),
+            ("retrieve_chunks", "replan"),
+            ("retrieve_summaries", "replan"),
+            ("retrieve_book_quotes", "replan"),
+            ("answer", "replan"),
+            ("replan", "can_be_answered_already"),
+            ("replan", "break_down_plan"),
+            ("can_be_answered_already", "get_final_answer")
+        ]
+        for node in nodes:
+            color= "#00FF00" if node["id"] == current_state else "#FF69B4"  # Green if current, else pink
+            net.add_node(node["id"], label=node["label"], color=color, x=node["x"], y=node["y"], physics=False)
+            logger.debug(f"Added node: {node['id']}")
+
+        logger.debug(f"Added {len(nodes)} nodes to network")
+
+        # Add edges with a default color
+        for edge in edges:
+            net.add_edge(edge[0], edge[1], color="#808080")  # Set edge color to gray
+            logger.debug(f"Added edge: {edge[0]} -> {edge[1]}")
+
+        logger.debug(f"Added {len(edges)} edges to network")
+
+        net.options.edges.smooth.type = "straight" # Set edges to straight lines
+        logger.info(f"Network graph created successfully for state: {current_state}")
+        return net
+    except Exception as e:
+        logger.error(f"Error in create_network_graph: {str(e)}", exc_info=True)
+        raise
 
 def compute_initial_position(net):
     """
@@ -78,7 +105,7 @@ def compute_initial_position(net):
         dict: The initial position of the graph.
     """
     net.barnes_hut()
-    return {node["id"]: {"x": node["x"], "y": node["y"]} for node in net.nodes}
+    return {node["id"]: {"x": node["x"], "y": node["y"]}     for node in net.nodes}
 
 def save_and_display_graph(net):
     """
@@ -87,13 +114,27 @@ def save_and_display_graph(net):
     Args:
         net (Network): The network graph visualization.
     """
-    with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
-        net.write_html(tmp_file.name,notebook=True)
-        tmp_file.flush()
-        mlflow.log_artifact(tmp_file.name, artifact_path="network_graphs")
-        with open(tmp_file.name, "r", encoding="utf-8") as f:
-            html_content = f.read()
-            return html_content
+    try:
+        logger.debug("save_and_display_graph called")
+        with tempfile.NamedTemporaryFile(delete=False, suffix=".html") as tmp_file:
+            logger.debug(f"Created temporary file: {tmp_file.name}")
+            net.write_html(tmp_file.name, notebook=True)
+            logger.debug("Wrote HTML to file")
+            tmp_file.flush()
+
+            logger.info(f"Logging artifact to MLflow: {tmp_file.name}")
+            mlflow.log_artifact(tmp_file.name, artifact_path="network_graphs")
+
+            with open(tmp_file.name, "r", encoding="utf-8") as f:
+                html_content = f.read()
+                logger.info(f"Read HTML content: {len(html_content)} characters")
+                return html_content
+    except IOError as e:
+        logger.error(f"File I/O error in save_and_display_graph: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in save_and_display_graph: {str(e)}", exc_info=True)
+        raise
         
         
 def updates_placeholders_and_graph(agent_state_value, placeholders, graph_placeholder, previous_values, previous_state):
@@ -152,77 +193,129 @@ def execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, gra
         str: The final response from the agent.
     """
     config = {"recursion_limit": recurtion_limit}
-    agent_state_value =None
+    agent_state_value = None
     progress_bar = st.progress(0)
-    count_step =0
+    count_step = 0
     previous_state = None
-    previous_values = {key:None for key in placeholders}
-    
+    previous_values = {key: None for key in placeholders}
+
     try:
+        logger.info(f"Starting plan execution with recursion_limit: {recurtion_limit}")
+        logger.debug(f"Inputs: {inputs}")
+
         for plan_output in plan_and_execute_app.stream(inputs, config=config):
             count_step += 1
+            logger.debug(f"Processing step {count_step}")
+
             for step, agent_state_value in plan_output.items():
+                logger.info(f"Step {count_step}: {step}")
                 print(f"Step: {step}, Agent State Value: {agent_state_value}")
-                mlflow.log_metric("steps_executed", count_step)
-                mlflow.log_text(str(agent_state_value), artifact_file=f"step_{count_step}_state.txt")
+
+                try:
+                    mlflow.log_metric("steps_executed", count_step)
+                    mlflow.log_text(str(agent_state_value), artifact_file=f"step_{count_step}_state.txt")
+                    logger.debug(f"Logged step {count_step} to MLflow")
+                except Exception as mlflow_error:
+                    logger.warning(f"Failed to log to MLflow: {str(mlflow_error)}")
+
                 previous_values, previous_state = updates_placeholders_and_graph(agent_state_value, placeholders, graph_placeholder, previous_values, previous_state)
-                progress_bar.progress(count_step/recurtion_limit)
+                progress_bar.progress(count_step / recurtion_limit)
+
                 if count_step >= recurtion_limit:
+                    logger.warning(f"Reached recursion limit: {recurtion_limit}")
                     break
-                
+
+        logger.info("Plan execution completed, displaying final results")
+
         for key, placeholder in placeholders.items():
-            if key in previous_values and previous_values[key] is not None:
-                if isinstance(previous_values[key],list):
-                    formatted_value = "\n".join([f"{i+1}. {item}" for i, item in enumerate(previous_values[key])])
-                else:
-                    formatted_value = previous_values[key]
-                placeholder.markdown(f"{formatted_value}")
-                
+            if previous_values is not None:
+                if key in previous_values and previous_values[key] is not None:
+                    if isinstance(previous_values[key], list):
+                        formatted_value = "\n".join([f"{i+1}. {item}" for i, item in enumerate(previous_values[key])])
+                    else:
+                        formatted_value = previous_values[key]
+                    placeholder.markdown(f"{formatted_value}")
+                    logger.debug(f"Updated placeholder: {key}")
+
         response = agent_state_value.get('response', "No response generated.") if agent_state_value else "No response generated."
+        logger.info(f"Final response: {response[:100]}")
         return response
-                
+
     except Exception as e:
+        logger.error(f"Error during execution: {str(e)}", exc_info=True)
         st.error(f"Error during execution: {e}")
         return "An error occurred during execution."
 def main():
     """Main function to run the Streamlit app
     """
-    st.set_page_config(page_title="Agent Network Graph", page_icon="🌐", layout="wide")
-    st.title("Agent Network Graph Visualization")
-    
-    # Load the current state of the agent
-    plan_and_execute_app = create_agent()
-    
-    question = st.text_input("Enter your question:")
-    if st.button("Submit"):
-        inputs = {"question": question}
-        
-        st.markdown("**Graph**")
-        graph_placeholder = st.empty()  # Placeholder for the graph
-        
-        col1, col2, col3 = st.columns([1,1,4])
-        with col1:
-            st.markdown("**Plan**")
-        with col2:
-            st.markdown("**Past Steps**")
-        with col3:
-            st.markdown("**Aggregated Context**")
-            
-        placeholders ={
-            "plan": col1.empty(),
-            "past_steps": col2.empty(),
-            "aggregated_context": col3.empty()
-        }
-        with mlflow.start_run(run_name="Sophisticated Agent Execution"):
-            mlflow.log_param("question", question)
-            response = execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, graph_placeholder, recurtion_limit=45)
-            mlflow.log_text(response, artifact_file="final_response.txt")
-            
-            
-        st.write("**Final Answer:**")
-        st.write(response)
-        
-        
-        
+    try:
+        logger.info("Starting main Streamlit app")
+        st.set_page_config(page_title="Agent Network Graph", page_icon="🌐", layout="wide")
+        st.title("Agent Network Graph Visualization")
+        logger.debug("Streamlit page config set")
+
+        # Load the current state of the agent
+        logger.info("Creating agent...")
+        plan_and_execute_app = create_agent()
+        logger.info("Agent created successfully")
+
+        question = st.text_input("Enter your question:")
+        logger.debug(f"Question input: {question[:50] if question else 'No input'}")
+
+        if st.button("Submit"):
+            logger.info(f"Processing question: {question[:50]}")
+            inputs = {"question": question}
+
+            st.markdown("**Graph**")
+            graph_placeholder = st.empty()  # Placeholder for the graph
+
+            col1, col2, col3 = st.columns([1, 1, 4])
+            with col1:
+                st.markdown("**Plan**")
+            with col2:
+                st.markdown("**Past Steps**")
+            with col3:
+                st.markdown("**Aggregated Context**")
+
+            placeholders = {
+                "plan": col1.empty(),
+                "past_steps": col2.empty(),
+                "aggregated_context": col3.empty()
+            }
+            logger.debug("Created placeholders")
+
+            try:
+                with mlflow.start_run(run_name="Sophisticated Agent Execution"):
+                    logger.info("MLflow run started")
+                    mlflow.log_param("question", question)
+                    logger.debug("Logged question to MLflow")
+
+                    response = execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, graph_placeholder, recurtion_limit=45)
+                    logger.info(f"Plan execution completed, response length: {len(response)}")
+
+                    mlflow.log_text(response, artifact_file="final_response.txt")
+                    logger.info("Logged final response to MLflow")
+
+            except Exception as mlflow_error:
+                logger.error(f"MLflow error: {str(mlflow_error)}", exc_info=True)
+                raise
+
+            st.write("**Final Answer:**")
+            st.write(response)
+            logger.info("Displayed final answer in UI")
+
+    except Exception as e:
+        logger.error(f"Fatal error in main: {str(e)}", exc_info=True)
+        st.error(f"Fatal error: {str(e)}")
+        raise
+
+
 if __name__ == "__main__":
-    main()
+    logger.info("=" * 80)
+    logger.info("Sophisticated Agent Application Started")
+    logger.info("=" * 80)
+    try:
+        main()
+    except Exception as e:
+        logger.critical(f"Application crashed: {str(e)}", exc_info=True)
+        raise
