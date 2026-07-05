@@ -1,7 +1,9 @@
+import os
 from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import FAISS
 from langchain_ollama import OllamaEmbeddings
-from langchain_ollama import ChatOllama
+# from langchain_ollama import ChatOllama
+# from langchain_openrouter import ChatOpenRouter
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
 from langchain_core.output_parsers import JsonOutputParser
@@ -9,22 +11,58 @@ from langchain_core.output_parsers import JsonOutputParser
 from langgraph.graph import END, StateGraph
 
 from dotenv import load_dotenv
-import os
 from typing_extensions import TypedDict
-from typing import List, Dict, Any
+from typing import List, Dict, Any, Optional
+import logging
+
+# Configure logging
+logging.basicConfig(
+    level=logging.DEBUG,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(funcName)s:%(lineno)d - %(message)s',
+    handlers=[
+        logging.FileHandler('./logs/functions_for_pipeline.log'),
+        logging.StreamHandler()
+    ]
+)
+logger = logging.getLogger(__name__)
 
 load_dotenv()
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY") or ""
+os.environ["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY") or ""
 os.environ['LANGSMITH_API_KEY'] = os.getenv("LANGSMITH_API_KEY") or ""
+# os.environ['NVIDIA_API_KEY'] = os.getenv("NVIDIA_API_KEY") or ""
+nvidia_key = os.environ.get("NVIDIA_API_KEY")
+if not nvidia_key:
+    raise ValueError("NVIDIA_API_KEY environment variable is missing!")
+
 def create_retrievers():
-    embeddings = OllamaEmbeddings(model="llama3.2:latest")
-    chunks_vector_store = FAISS.load_local("chunks_vector_store", embeddings, allow_dangerous_deserialization=True)
-    chapters_vector_store = FAISS.load_local("chapter_summaries_vector_store", embeddings, allow_dangerous_deserialization=True)
-    book_quotes_vector_store = FAISS.load_local("book_quotes_vectorstore", embeddings, allow_dangerous_deserialization=True)
-    chunks_retriever = chunks_vector_store.as_retriever(search_kwargs={"k": 3})
-    chapters_retriever = chapters_vector_store.as_retriever(search_kwargs={"k": 3})
-    book_quotes_retriever = book_quotes_vector_store.as_retriever(search_kwargs={"k": 3})
-    return chunks_retriever, chapters_retriever, book_quotes_retriever
+    """Create and return retrievers from vector stores."""
+    try:
+        logger.debug("Starting create_retrievers")
+        embeddings = OllamaEmbeddings(model="nomic-embed-text:v1.5")
+        logger.debug("Created OllamaEmbeddings")
+
+        chunks_vector_store = FAISS.load_local("chunks_vector_store", embeddings, allow_dangerous_deserialization=True)
+        logger.info("Loaded chunks_vector_store")
+
+        chapters_vector_store = FAISS.load_local("chapter_summaries_vector_store", embeddings, allow_dangerous_deserialization=True)
+        logger.info("Loaded chapter_summaries_vector_store")
+
+        book_quotes_vector_store = FAISS.load_local("book_quotes_vectorstore", embeddings, allow_dangerous_deserialization=True)
+        logger.info("Loaded book_quotes_vectorstore")
+
+        chunks_retriever = chunks_vector_store.as_retriever(search_kwargs={"k": 3})
+        chapters_retriever = chapters_vector_store.as_retriever(search_kwargs={"k": 3})
+        book_quotes_retriever = book_quotes_vector_store.as_retriever(search_kwargs={"k": 3})
+
+        logger.info("Successfully created all retrievers")
+        return chunks_retriever, chapters_retriever, book_quotes_retriever
+    except FileNotFoundError as e:
+        logger.error(f"Vector store file not found: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in create_retrievers: {str(e)}", exc_info=True)
+        raise
     
 def retrieve_context_per_question(state:dict):
     """
@@ -33,21 +71,39 @@ def retrieve_context_per_question(state:dict):
     Args:
         state: A dictionary containing the question to answer.
     """
-    question = state['question']
-    chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
-    # Retrieve relevant documents
-    print("Retrieving relevant chunks...")
-    docs = chunks_retriever.invoke(question)
-    context = " ".join(doc.page_content for doc in docs)
-    print("Retrieving relevant chapter summaries...")
-    docs_summaries = chapters_retriever.invoke(state["question"])
-    context_summaries = " ".join(f"{doc.page_content} (Chapter {doc.metadata['chapter']})" for doc in docs_summaries)
-    
-    print("Retrieving relevant book quotes...")
-    docs_quotes = book_quotes_retriever.invoke(state["question"])
-    context_quotes = " ".join(doc.page_content for doc in docs_quotes)
-    all_contexts = context + context_summaries + context_quotes
-    return {"context": all_contexts, "question": question}
+    try:
+        logger.debug(f"retrieve_context_per_question called with question: {state.get('question', 'N/A')[:50]}")
+        question = state['question']
+        chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
+
+        # Retrieve relevant documents
+        logger.info("Retrieving relevant chunks...")
+        print("Retrieving relevant chunks...")
+        docs = chunks_retriever.invoke(question)
+        logger.debug(f"Retrieved {len(docs)} chunk documents")
+        context = " ".join(doc.page_content for doc in docs)
+
+        logger.info("Retrieving relevant chapter summaries...")
+        print("Retrieving relevant chapter summaries...")
+        docs_summaries = chapters_retriever.invoke(state["question"])
+        logger.debug(f"Retrieved {len(docs_summaries)} summary documents")
+        context_summaries = " ".join(f"{doc.page_content} (Chapter {doc.metadata['chapter']})" for doc in docs_summaries)
+
+        logger.info("Retrieving relevant book quotes...")
+        print("Retrieving relevant book quotes...")
+        docs_quotes = book_quotes_retriever.invoke(state["question"])
+        logger.debug(f"Retrieved {len(docs_quotes)} quote documents")
+        context_quotes = " ".join(doc.page_content for doc in docs_quotes)
+
+        all_contexts = context + context_summaries + context_quotes
+        logger.info(f"Total context retrieved: {len(all_contexts)} characters")
+        return {"context": all_contexts, "question": question}
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in retrieve_context_per_question: {str(e)}", exc_info=True)
+        raise
 
 def keep_only_relevant_context_chain():
     only_relevant_context_prompt_template = """
@@ -57,9 +113,10 @@ def keep_only_relevant_context_chain():
     
     keep_only_relevant_context_prompt = PromptTemplate(template=only_relevant_context_prompt_template, input_variables=["query", "retrieved_docs"])
     keep_only_relevent_context_llm = ChatOpenAI(
-        model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference"
-    )
+        model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key  
+    )   
     only_relevant_context_chain = keep_only_relevant_context_prompt | keep_only_relevent_context_llm.with_structured_output(KeepReleventContext)
     return only_relevant_context_chain
     
@@ -76,30 +133,47 @@ def keep_only_relevant_content(state):
     Returns:
     The relevant content from the retrieved documents that is relevant to the query.
     """
-    question = state["question"]
-    context = state["context"]
+    try:
+        logger.debug(f"keep_only_relevant_content called")
+        question = state["question"]
+        context = state["context"]
+        logger.debug(f"Question length: {len(question)}, Context length: {len(context)}")
 
-    input_data = {
-    "query": question,
-    "retrieved_docs": context
-    }
-    print("keeping only the relevant content...")
-    print("--------------------")
-    only_relevant_context_chain = keep_only_relevant_context_chain()
-    output = only_relevant_context_chain.invoke(input_data)
-    relevant_content = output.relevant_content
-    relevant_content = "".join(relevant_content)
-    # relevant_content = escape_quotes(relevant_content)
+        input_data = {
+            "query": question,
+            "retrieved_docs": context
+        }
+        logger.info("Creating keep_only_relevant_context_chain...")
+        print("keeping only the relevant content...")
+        print("--------------------")
+        only_relevant_context_chain = keep_only_relevant_context_chain()
+        logger.debug("Chain created successfully")
 
-    return {"relevant_context": relevant_content, "context": context, "question": question}
+        logger.info("Invoking chain to filter relevant content...")
+        output = only_relevant_context_chain.invoke(input_data)
+        logger.debug("Chain invocation completed")
+
+        relevant_content = output.relevant_content
+        relevant_content = "".join(relevant_content)
+        logger.info(f"Filtered relevant content: {len(relevant_content)} characters")
+        # relevant_content = escape_quotes(relevant_content)
+
+        return {"relevant_context": relevant_content, "context": context, "question": question}
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in keep_only_relevant_content: {str(e)}", exc_info=True)
+        raise
 
 def build_questions_using_chain_of_thoughts_chain():
     class QuestionAnswerFromContext(BaseModel):
         answer_based_on_content: str = Field(description="generates an answer to a query based on a given context.")
     question_answer_from_context_llm = ChatOpenAI(
-        model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference"
-        )
+        model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key  
+    )
 
 
     question_answer_cot_prompt_template = """ 
@@ -165,20 +239,35 @@ def generate_answer_from_context(state):
     Returns:
         The answer to the question from the context.
     """
-    
-    question = state["question"]
-    context = state["relevant_context"]
-    input_data = {
-    "question": question,
-    "context": context
-    }
-    questions_using_chain_of_thoughts_chain= build_questions_using_chain_of_thoughts_chain()
-    print("Answering the question from the retrieved context...")
+    try:
+        logger.debug(f"generate_answer_from_context called")
+        question = state["question"]
+        context = state["relevant_context"]
+        logger.debug(f"Question: {question[:50]}, Context length: {len(context)}")
 
-    output = questions_using_chain_of_thoughts_chain.invoke(input_data)
-    answer = output.answer_based_on_content
-    print(f'answer before checking hallucination: {answer}')
-    return {"answer": answer, "context": context, "question": question}
+        input_data = {
+            "question": question,
+            "context": context
+        }
+        logger.info("Building chain of thoughts chain...")
+        questions_using_chain_of_thoughts_chain = build_questions_using_chain_of_thoughts_chain()
+        logger.debug("Chain built successfully")
+
+        print("Answering the question from the retrieved context...")
+        logger.info("Invoking chain to generate answer...")
+        output = questions_using_chain_of_thoughts_chain.invoke(input_data)
+        logger.debug("Chain invocation completed")
+
+        answer = output.answer_based_on_content
+        logger.info(f"Generated answer: {answer[:100]}...")
+        print(f'answer before checking hallucination: {answer}')
+        return {"answer": answer, "context": context, "question": question}
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in generate_answer_from_context: {str(e)}", exc_info=True)
+        raise
     
     
 def build_is_relevant_content_chain():
@@ -192,9 +281,10 @@ def build_is_relevant_content_chain():
     # is_relevant_json_parser = JsonOutputParser(pydantic_object=Relevance)
     # is_relevant_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
     is_relevant_llm = ChatOpenAI(
-        model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference"
-        )
+       model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key  
+    )
 
     is_relevant_content_prompt = PromptTemplate(
         template=is_relevant_content_prompt_template,
@@ -239,8 +329,9 @@ def create_is_grounded_on_facts_chain():
         grounded_on_facts: bool = Field(description="Answer is grounded in the facts, 'yes' or 'no'")
 
     is_grounded_on_facts_llm = ChatOpenAI(
-        model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference"
+        model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key
         )
     is_grounded_on_facts_prompt_template = """You are a fact-checker that determines if the given answer {answer} is grounded in the given context {context}
     you don't mind if it doesn't make sense, as long as it is grounded in the context.
@@ -272,9 +363,10 @@ def create_can_be_answered_chain():
 
     # can_be_answered_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
     can_be_answered_llm = ChatOpenAI(
-        model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference"
-        )
+         model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key  
+    )
     can_be_answered_chain = answer_question_prompt | can_be_answered_llm.with_structured_output(QuestionAnswer)
     return can_be_answered_chain
 
@@ -299,7 +391,8 @@ def create_is_distilled_content_grounded_on_content_chain():
     # is_distilled_content_grounded_on_content_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
     is_distilled_content_grounded_on_content_llm =ChatOpenAI(
         model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference"
+        base_url="https://models.github.ai/inference",
+        api_key=nvidia_key
         )
 
     is_distilled_content_grounded_on_content_chain = is_distilled_content_grounded_on_content_prompt | is_distilled_content_grounded_on_content_llm.with_structured_output(IsDistilledContentGroundedOnContent)
@@ -347,17 +440,29 @@ def retrieve_chunks_context_per_question(state):
     Args:
         state: A dictionary containing the question to answer.
     """
-    chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
-    # Retrieve relevant documents
-    print("Retrieving relevant chunks...")
-    question = state["question"]
-    
-    docs = chunks_retriever.invoke(question)
+    try:
+        logger.debug("retrieve_chunks_context_per_question called")
+        chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
+        # Retrieve relevant documents
+        logger.info("Retrieving relevant chunks...")
+        print("Retrieving relevant chunks...")
+        question = state["question"]
+        logger.debug(f"Question: {question[:50]}")
 
-    # Concatenate document content
-    context = " ".join(doc.page_content for doc in docs)
-    # context = escape_quotes(context)
-    return {"context": context, "question": question}
+        docs = chunks_retriever.invoke(question)
+        logger.debug(f"Retrieved {len(docs)} documents")
+
+        # Concatenate document content
+        context = " ".join(doc.page_content for doc in docs)
+        logger.info(f"Concatenated context length: {len(context)} characters")
+        # context = escape_quotes(context)
+        return {"context": context, "question": question}
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in retrieve_chunks_context_per_question: {str(e)}", exc_info=True)
+        raise
 
 
 def retrieve_summaries_context_per_question(state):
@@ -384,7 +489,7 @@ def retrieve_book_quotes_context_per_question(state):
     book_qoutes = " ".join(doc.page_content for doc in docs_book_quotes)
     # book_qoutes_context = escape_quotes(book_qoutes)
 
-    return {"context": docs_book_quotes, "question": question}
+    return {"context": book_qoutes, "question": question}
 class QualitativeRetrievalGraphState(TypedDict):
     """
     Represents the state of our graph.
@@ -524,7 +629,7 @@ class PlanExecute(TypedDict):
     query_to_retrieve_or_answer: str
     plan: List[str]
     past_steps: List[str]
-    mapping: dict 
+    mapping: Dict[str, str]
     curr_context: str
     aggregated_context: str
     tool: str
@@ -551,7 +656,10 @@ def create_plan_chain():
         input_variables=["question"], 
         )
 
-    planner_llm = ChatOpenAI(model="openai/gpt-4.1", base_url="https://models.github.ai/inference", temperature=0)
+    planner_llm = ChatOpenAI( model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key  
+    )
 
     planner = planner_prompt | planner_llm.with_structured_output(Plan)
     return planner
@@ -576,7 +684,7 @@ def create_break_down_plan_chain():
         input_variables=["plan"],
     )
 
-    break_down_plan_llm = ChatOpenAI(model="openai/gpt-4.1", base_url="https://models.github.ai/inference", temperature=0)
+    break_down_plan_llm = ChatOpenAI(model="z-ai/glm-5.2", base_url="https://integrate.api.nvidia.com/v1", temperature=0, api_key=nvidia_key)
 
     break_down_plan_chain = break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan)
 
@@ -622,7 +730,7 @@ def create_replanner_chain():
         # partial_variables={"format_instructions": act_possible_results_parser.get_format_instructions()},
     )
 
-    replanner_llm = ChatOpenAI(model="openai/gpt-4.1", base_url="https://models.github.ai/inference", temperature=0)
+    replanner_llm = ChatOpenAI(model="z-ai/glm-5.2", base_url="https://integrate.api.nvidia.com/v1", temperature=0, api_key=nvidia_key)
 
 
     replanner = replanner_prompt | replanner_llm.with_structured_output(Plan)
@@ -631,17 +739,17 @@ def create_replanner_chain():
 def create_task_handler_chain():
     tasks_handler_prompt_template = """You are a task handler that receives a task {curr_task} and have to decide with tool to use to execute the task.
     You have the following tools at your disposal:
-    Tool A: a tool that retrieves relevant information from a vector store of book chunks based on a given query.
-    - use Tool A when you think the current task should search for information in the book chunks.
-    Took B: a tool that retrieves relevant information from a vector store of chapter summaries based on a given query.
-    - use Tool B when you think the current task should search for information in the chapter summaries.
-    Tool C: a tool that retrieves relevant information from a vector store of quotes from the book based on a given query.
-    - use Tool C when you think the current task should search for information in the book quotes.
-    Tool D: a tool that answers a question from a given context.
-    - use Tool D ONLY when you the current task can be answered by the aggregated context {aggregated_context}
+    retrieve_chunks: a tool that retrieves relevant information from a vector store of book chunks based on a given query.
+    - use retrieve_chunks when you think the current task should search for information in the book chunks.
+    retrieve_summaries: a tool that retrieves relevant information from a vector store of chapter summaries based on a given query.
+    - use retrieve_summaries when you think the current task should search for information in the chapter summaries.
+    retrieve_quotes: a tool that retrieves relevant information from a vector store of quotes from the book based on a given query.
+    - use retrieve_quotes when you think the current task should search for information in the book quotes.
+    answer_from_context: a tool that answers a question from a given context.
+    - use answer_from_context ONLY when you the current task can be answered by the aggregated context {aggregated_context}
 
     you also receive the last tool used {last_tool}
-    if {last_tool} was retrieve_chunks, use other tools than Tool A.
+    if {last_tool} was retrieve_chunks, use other tools than retrieve_chunks.
 
     You also have the past steps {past_steps} that you can use to make decisions and understand the context of the task.
     You also have the initial user's question {question} that you can use to make decisions and understand the context of the task.
@@ -659,18 +767,18 @@ def create_task_handler_chain():
 
     task_handler_prompt = PromptTemplate(
         template=tasks_handler_prompt_template,
-        input_variables=["curr_task", "aggregated_context", "last_tool" "past_steps", "question"],
+        input_variables=["curr_task", "aggregated_context", "last_tool", "past_steps", "question"],
     )
 
-    task_handler_llm = ChatOpenAI(model="openai/gpt-4.1", temperature=0, base_url="https://models.github.ai/inference")
+    task_handler_llm = ChatOpenAI(model="z-ai/glm-5.2", temperature=0, base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
     task_handler_chain = task_handler_prompt | task_handler_llm.with_structured_output(TaskHandlerOutput)
     return task_handler_chain
 
 def create_anonymize_question_chain():
     class AnonymizeQuestion(BaseModel):
         """Anonymized question and mapping."""
-        anonymized_question : str = Field(description="Anonymized question.")
-        mapping: dict[str,str] = Field(description="Mapping of original name entities to variables.")
+        anonymized_question: str = Field(description="Anonymized question.")
+        mapping: Dict[str, str] = Field(description="Mapping of original name entities to variables.")
         explanation: str = Field(description="Explanation of the action.")
 
     anonymize_question_parser = JsonOutputParser(pydantic_object=AnonymizeQuestion)
@@ -693,7 +801,7 @@ def create_anonymize_question_chain():
         partial_variables={"format_instructions": anonymize_question_parser.get_format_instructions()},
     )
 
-    anonymize_question_llm = ChatOpenAI(model="openai/gpt-4.1", temperature=0, base_url="https://models.github.ai/inference")
+    anonymize_question_llm = ChatOpenAI(model="z-ai/glm-5.2", temperature=0, base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
     anonymize_question_chain = anonymize_question_prompt | anonymize_question_llm | anonymize_question_parser
     return anonymize_question_chain
 
@@ -715,7 +823,10 @@ def create_deanonymize_plan_chain():
     )
     
 
-    de_anonymize_plan_llm = ChatOpenAI(model="openai/gpt-4.1", temperature=0, base_url="https://models.github.ai/inference")
+    de_anonymize_plan_llm = ChatOpenAI(model="z-ai/glm-5.2",
+        base_url="https://integrate.api.nvidia.com/v1",
+        api_key=nvidia_key
+        )
     de_anonymize_plan_chain = de_anonymize_plan_prompt | de_anonymize_plan_llm.with_structured_output(DeAnonymizePlan)
     return de_anonymize_plan_chain
 
@@ -736,7 +847,7 @@ def create_can_be_answered_already_chain():
         input_variables=["question","context"],
     )
 
-    can_be_answered_already_llm = ChatOpenAI(model="openai/gpt-4.1", temperature=0, base_url="https://models.github.ai/inference")
+    can_be_answered_already_llm = ChatOpenAI(model="z-ai/glm-5.2", temperature=0, base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
     can_be_answered_already_chain = can_be_answered_already_prompt | can_be_answered_already_llm.with_structured_output(CanBeAnsweredAlready)
     return can_be_answered_already_chain
 
@@ -761,47 +872,68 @@ def run_task_handler_chain(state: PlanExecute):
     Returns:
        The updated state of the plan execution.
     """
-    state["curr_state"] = "task_handler"
-    print("the current plan is:")
-    print(state["plan"])
-    print("--------------------") 
+    try:
+        logger.debug("run_task_handler_chain called")
+        state["curr_state"] = "task_handler"
+        logger.info("Current plan:")
+        print("the current plan is:")
+        print(state["plan"])
+        logger.debug(f"Plan: {state['plan']}")
+        print("--------------------")
 
-    if "past_steps" not in state or state['past_steps'] is None:
-        state["past_steps"] = []
+        if "past_steps" not in state or state['past_steps'] is None:
+            state["past_steps"] = []
+            logger.debug("Initialized past_steps")
 
-    curr_task = state["plan"][0]
+        curr_task = state["plan"][0]
+        logger.debug(f"Current task: {curr_task}")
 
-    inputs = {"curr_task": curr_task,
-               "aggregated_context": state.get("aggregated_context", ""),
-                "last_tool": state.get("tool", ""),
-                "past_steps": state["past_steps"],
-                "question": state["question"]}
-    
-    output = task_handler_chain.invoke(inputs)
-  
-    state["past_steps"].append(curr_task)
-    state["plan"].pop(0)
+        inputs = {"curr_task": curr_task,
+                   "aggregated_context": state.get("aggregated_context", ""),
+                   "last_tool": state.get("tool", ""),
+                   "past_steps": state["past_steps"],
+                   "question": state["question"]}
 
-    if output.tool == "retrieve_chunks":
-        state["query_to_retrieve_or_answer"] = output.query
-        state["tool"]="retrieve_chunks"
-    
-    elif output.tool == "retrieve_summaries":
-        state["query_to_retrieve_or_answer"] = output.query
-        state["tool"]="retrieve_summaries"
+        logger.info("Invoking task handler chain...")
+        output = task_handler_chain.invoke(inputs)
+        logger.debug(f"Task handler output tool: {output.tool}")
 
-    elif output.tool == "retrieve_quotes":
-        state["query_to_retrieve_or_answer"] = output.query
-        state["tool"]="retrieve_quotes"
+        state["past_steps"].append(curr_task)
+        state["plan"].pop(0)
+        logger.debug(f"Remaining plan items: {len(state['plan'])}")
 
-    
-    elif output.tool == "answer_from_context":
-        state["query_to_retrieve_or_answer"] = output.query
-        state["curr_context"] = output.curr_context
-        state["tool"]="answer"
-    else:
-        raise ValueError("Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'")
-    return state  
+        if output.tool == "retrieve_chunks":
+            state["query_to_retrieve_or_answer"] = output.query
+            state["tool"]="retrieve_chunks"
+            logger.info("Selected retrieve_chunks tool")
+
+        elif output.tool == "retrieve_summaries":
+            state["query_to_retrieve_or_answer"] = output.query
+            state["tool"]="retrieve_summaries"
+            logger.info("Selected retrieve_summaries tool")
+
+        elif output.tool == "retrieve_quotes":
+            state["query_to_retrieve_or_answer"] = output.query
+            state["tool"]="retrieve_quotes"
+            logger.info("Selected retrieve_quotes tool")
+
+        elif output.tool == "answer_from_context":
+            state["query_to_retrieve_or_answer"] = output.query
+            state["curr_context"] = output.curr_context
+            state["tool"]="answer"
+            logger.info("Selected answer_from_context tool")
+        else:
+            logger.error(f"Invalid tool selected: {output.tool}")
+            raise ValueError("Invalid tool was outputed. Must be either 'retrieve' or 'answer_from_context'")
+
+        logger.info("Task handler chain execution completed successfully")
+        return state
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in run_task_handler_chain: {str(e)}", exc_info=True)
+        raise  
 
 
 @mlflow.trace(span_type="retrieve_or_answer")
@@ -835,18 +967,35 @@ def run_qualitative_chunks_retrieval_workflow(state):
     Returns:
         The state with the updated aggregated context.
     """
-    state["curr_state"] = "retrieve_chunks"
-    print("Running the qualitative chunks retrieval workflow...")
-    question = state["query_to_retrieve_or_answer"]
-    inputs = {"question": question}
-    for output in qualitative_chunks_retrieval_workflow_app.stream(inputs):
-        for _, _ in output.items():
-            pass 
-        print("--------------------")
-    if "aggregated_context" not in state or state["aggregated_context"] is None:
-        state["aggregated_context"] = ""
-    state["aggregated_context"] += output['relevant_context']
-    return state
+    try:
+        logger.debug("run_qualitative_chunks_retrieval_workflow called")
+        state["curr_state"] = "retrieve_chunks"
+        logger.info("Running the qualitative chunks retrieval workflow...")
+        print("Running the qualitative chunks retrieval workflow...")
+
+        question = state["query_to_retrieve_or_answer"]
+        logger.debug(f"Query: {question[:50]}")
+
+        inputs = {"question": question}
+        logger.debug("Streaming workflow...")
+        for output in qualitative_chunks_retrieval_workflow_app.stream(inputs):
+            for _, _ in output.items():
+                pass
+            print("--------------------")
+
+        if "aggregated_context" not in state or state["aggregated_context"] is None:
+            state["aggregated_context"] = ""
+            logger.debug("Initialized aggregated_context")
+
+        state["aggregated_context"] += output['relevant_context']
+        logger.info(f"Updated aggregated_context to {len(state['aggregated_context'])} characters")
+        return state
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in run_qualitative_chunks_retrieval_workflow: {str(e)}", exc_info=True)
+        raise
 
 @mlflow.trace(span_type="qualitative_summaries_retrieval_workflow")
 def run_qualitative_summaries_retrieval_workflow(state):
@@ -948,20 +1097,38 @@ def anonymize_queries(state: PlanExecute):
     Returns:
         The updated state with the anonymized question and mapping.
     """
-    state["curr_state"] = "anonymize_question"
-    print("state['question']: ", state['question'])
-    print("Anonymizing question")
-    print("--------------------")
-    input_values = {"question": state['question']}
-    anonymized_question_output = anonymize_question_chain.invoke(input_values)
-    print(f'anonymized_question_output: {anonymized_question_output}')
-    anonymized_question = anonymized_question_output["anonymized_question"]
-    print(f'anonimized_querry: {anonymized_question}')
-    print("--------------------")
-    mapping = anonymized_question_output["mapping"]
-    state["anonymized_question"] = anonymized_question
-    state["mapping"] = mapping
-    return state
+    try:
+        logger.debug("anonymize_queries called")
+        state["curr_state"] = "anonymize_question"
+        logger.info(f"Anonymizing question: {state['question'][:50]}")
+        print("state['question']: ", state['question'])
+        print("Anonymizing question")
+        print("--------------------")
+
+        input_values = {"question": state['question']}
+        logger.debug("Invoking anonymize_question_chain...")
+        anonymized_question_output = anonymize_question_chain.invoke(input_values)
+        logger.debug(f"Chain output: {anonymized_question_output}")
+        print(f'anonymized_question_output: {anonymized_question_output}')
+
+        anonymized_question = anonymized_question_output["anonymized_question"]
+        logger.info(f"Anonymized question: {anonymized_question}")
+        print(f'anonimized_querry: {anonymized_question}')
+        print("--------------------")
+
+        mapping = anonymized_question_output["mapping"]
+        logger.debug(f"Mapping: {mapping}")
+        state["anonymized_question"] = anonymized_question
+        state["mapping"] = mapping
+
+        logger.info("Anonymization completed successfully")
+        return state
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in anonymize_queries: {str(e)}", exc_info=True)
+        raise
 
 @mlflow.trace(span_type="deanonymize_queries")
 def deanonymize_queries(state: PlanExecute):
@@ -990,13 +1157,29 @@ def plan_step(state: PlanExecute):
     Returns:
         The updated state with the plan.
     """
-    state["curr_state"] = "planner"
-    print("Planning step")
-    print("--------------------")
-    plan = planner.invoke({"question": state['anonymized_question']})
-    state["plan"] = plan.steps
-    print(f'plan: {state["plan"]}')
-    return state
+    try:
+        logger.debug("plan_step called")
+        state["curr_state"] = "planner"
+        logger.info("Planning step")
+        print("Planning step")
+        print("--------------------")
+
+        logger.debug(f"Anonymized question: {state['anonymized_question'][:50]}")
+        plan = planner.invoke({"question": state['anonymized_question']})
+        logger.debug("Planner chain invoked successfully")
+
+        state["plan"] = plan.steps
+        logger.info(f"Generated plan with {len(state['plan'])} steps")
+        print(f'plan: {state["plan"]}')
+        logger.debug(f"Plan steps: {state['plan']}")
+
+        return state
+    except KeyError as e:
+        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
+        raise
+    except Exception as e:
+        logger.error(f"Error in plan_step: {str(e)}", exc_info=True)
+        raise
 
 @mlflow.trace(span_type="break_down_plan_step")
 def break_down_plan_step(state: PlanExecute):
@@ -1064,82 +1247,98 @@ def can_be_answered(state: PlanExecute):
 
 @mlflow.trace(name="create_agent")
 def create_agent():
-    
-    agent_workflow = StateGraph(PlanExecute)
+    """Create and compile the agent workflow graph."""
+    try:
+        logger.info("Starting create_agent")
+        agent_workflow = StateGraph(PlanExecute)
+        logger.debug("Created StateGraph")
 
-    # Add the anonymize node
-    agent_workflow.add_node("anonymize_question", anonymize_queries)
+        # Add the anonymize node
+        agent_workflow.add_node("anonymize_question", anonymize_queries)
+        logger.debug("Added anonymize_question node")
 
-    # Add the plan node
-    agent_workflow.add_node("planner", plan_step)
+        # Add the plan node
+        agent_workflow.add_node("planner", plan_step)
+        logger.debug("Added planner node")
 
-    # Add the break down plan node
+        # Add the break down plan node
+        agent_workflow.add_node("break_down_plan", break_down_plan_step)
+        logger.debug("Added break_down_plan node")
 
-    agent_workflow.add_node("break_down_plan", break_down_plan_step)
+        # Add the deanonymize node
+        agent_workflow.add_node("de_anonymize_plan", deanonymize_queries)
+        logger.debug("Added de_anonymize_plan node")
 
-    # Add the deanonymize node
-    agent_workflow.add_node("de_anonymize_plan", deanonymize_queries)
+        # Add the qualitative chunks retrieval node
+        agent_workflow.add_node("retrieve_chunks", run_qualitative_chunks_retrieval_workflow)
+        logger.debug("Added retrieve_chunks node")
 
-    # Add the qualitative chunks retrieval node
-    agent_workflow.add_node("retrieve_chunks", run_qualitative_chunks_retrieval_workflow)
+        # Add the qualitative summaries retrieval node
+        agent_workflow.add_node("retrieve_summaries", run_qualitative_summaries_retrieval_workflow)
+        logger.debug("Added retrieve_summaries node")
 
-    # Add the qualitative summaries retrieval node
-    agent_workflow.add_node("retrieve_summaries", run_qualitative_summaries_retrieval_workflow)
+        # Add the qualitative book quotes retrieval node
+        agent_workflow.add_node("retrieve_book_quotes", run_qualitative_book_quotes_retrieval_workflow)
+        logger.debug("Added retrieve_book_quotes node")
 
-    # Add the qualitative book quotes retrieval node
-    agent_workflow.add_node("retrieve_book_quotes", run_qualitative_book_quotes_retrieval_workflow)
+        # Add the qualitative answer node
+        agent_workflow.add_node("answer", run_qualtative_answer_workflow)
+        logger.debug("Added answer node")
 
+        # Add the task handler node
+        agent_workflow.add_node("task_handler", run_task_handler_chain)
+        logger.debug("Added task_handler node")
 
-    # Add the qualitative answer node
-    agent_workflow.add_node("answer", run_qualtative_answer_workflow)
+        # Add a replan node
+        agent_workflow.add_node("replan", replan_step)
+        logger.debug("Added replan node")
 
-    # Add the task handler node
-    agent_workflow.add_node("task_handler", run_task_handler_chain)
+        # Add answer from context node
+        agent_workflow.add_node("get_final_answer", run_qualtative_answer_workflow_for_final_answer)
+        logger.debug("Added get_final_answer node")
 
-    # Add a replan node
-    agent_workflow.add_node("replan", replan_step)
+        # Set the entry point
+        agent_workflow.set_entry_point("anonymize_question")
+        logger.debug("Set entry point to anonymize_question")
 
-    # Add answer from context node
-    agent_workflow.add_node("get_final_answer", run_qualtative_answer_workflow_for_final_answer)
+        # From anonymize we go to plan
+        agent_workflow.add_edge("anonymize_question", "planner")
 
-    # Set the entry point
-    agent_workflow.set_entry_point("anonymize_question")
+        # From plan we go to deanonymize
+        agent_workflow.add_edge("planner", "de_anonymize_plan")
 
-    # From anonymize we go to plan
-    agent_workflow.add_edge("anonymize_question", "planner")
+        # From deanonymize we go to break down plan
+        agent_workflow.add_edge("de_anonymize_plan", "break_down_plan")
 
-    # From plan we go to deanonymize
-    agent_workflow.add_edge("planner", "de_anonymize_plan")
+        # From break_down_plan we go to task handler
+        agent_workflow.add_edge("break_down_plan", "task_handler")
 
-    # From deanonymize we go to break down plan
+        # From task handler we go to either retrieve or answer
+        agent_workflow.add_conditional_edges("task_handler", retrieve_or_answer, {"chosen_tool_is_retrieve_chunks": "retrieve_chunks", "chosen_tool_is_retrieve_summaries":
+                                                                                "retrieve_summaries", "chosen_tool_is_retrieve_quotes": "retrieve_book_quotes", "chosen_tool_is_answer": "answer"})
+        logger.debug("Added conditional edges from task_handler")
 
-    agent_workflow.add_edge("de_anonymize_plan", "break_down_plan")
+        # After retrieving we go to replan
+        agent_workflow.add_edge("retrieve_chunks", "replan")
+        agent_workflow.add_edge("retrieve_summaries", "replan")
+        agent_workflow.add_edge("retrieve_book_quotes", "replan")
 
-    # From break_down_plan we go to task handler
-    agent_workflow.add_edge("break_down_plan", "task_handler")
+        # After answering we go to replan
+        agent_workflow.add_edge("answer", "replan")
 
-    # From task handler we go to either retrieve or answer
-    agent_workflow.add_conditional_edges("task_handler", retrieve_or_answer, {"chosen_tool_is_retrieve_chunks": "retrieve_chunks", "chosen_tool_is_retrieve_summaries":
-                                                                            "retrieve_summaries", "chosen_tool_is_retrieve_quotes": "retrieve_book_quotes", "chosen_tool_is_answer": "answer"})
+        # After replanning we check if the question can be answered
+        agent_workflow.add_conditional_edges("replan", can_be_answered, {"can_be_answered_already": "get_final_answer", "cannot_be_answered_yet": "break_down_plan"})
+        logger.debug("Added conditional edges from replan")
 
-    # After retrieving we go to replan
-    agent_workflow.add_edge("retrieve_chunks", "replan")
+        # After getting the final answer we end
+        agent_workflow.add_edge("get_final_answer", END)
 
-    agent_workflow.add_edge("retrieve_summaries", "replan")
+        logger.info("Compiling agent workflow...")
+        plan_and_execute_app = agent_workflow.compile()
+        logger.info("Agent workflow compiled successfully")
 
-    agent_workflow.add_edge("retrieve_book_quotes", "replan")
-
-    # After answering we go to replan
-    agent_workflow.add_edge("answer", "replan")
-
-    # After replanning we check if the question can be answered, if yes we go to get_final_answer, if not we go to task_handler
-    agent_workflow.add_conditional_edges("replan",can_be_answered, {"can_be_answered_already": "get_final_answer", "cannot_be_answered_yet": "break_down_plan"})
-
-    # After getting the final answer we end
-    agent_workflow.add_edge("get_final_answer", END)
-
-
-    plan_and_execute_app = agent_workflow.compile()
-
-    return plan_and_execute_app
+        return plan_and_execute_app
+    except Exception as e:
+        logger.error(f"Error in create_agent: {str(e)}", exc_info=True)
+        raise
 
