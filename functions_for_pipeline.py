@@ -1,12 +1,15 @@
 import os
 from langchain_openai import ChatOpenAI
 from langchain_community.vectorstores import FAISS
-from langchain_ollama import OllamaEmbeddings
-# from langchain_ollama import ChatOllama
+from langchain_community.embeddings import OllamaEmbeddings
+from langchain_ollama import ChatOllama
+from langchain_nvidia_ai_endpoints import ChatNVIDIA
+from langchain_google_genai import ChatGoogleGenerativeAI
 # from langchain_openrouter import ChatOpenRouter
 from langchain_core.prompts import PromptTemplate
 from pydantic import BaseModel, Field
-from langchain_core.output_parsers import JsonOutputParser
+from langchain_core.output_parsers import JsonOutputParser, StrOutputParser
+
 
 from langgraph.graph import END, StateGraph
 
@@ -30,10 +33,237 @@ load_dotenv()
 os.environ["OPENAI_API_KEY"] = os.getenv("OPENAI_API_KEY") or ""
 os.environ["OPENROUTER_API_KEY"] = os.getenv("OPENROUTER_API_KEY") or ""
 os.environ['LANGSMITH_API_KEY'] = os.getenv("LANGSMITH_API_KEY") or ""
+os.environ["GOOGLE_API_KEY"] = os.getenv("GOOGLE_API_KEY","")
+
 # os.environ['NVIDIA_API_KEY'] = os.getenv("NVIDIA_API_KEY") or ""
+ollama_api_key = os.environ.get("OLLAMA_API_KEY")
 nvidia_key = os.environ.get("NVIDIA_API_KEY")
 if not nvidia_key:
     raise ValueError("NVIDIA_API_KEY environment variable is missing!")
+if not ollama_api_key:
+    raise ValueError("OLLAMA_API_KEY environment variable is missing!")
+
+# ============================================================================
+# PHASE 1: Module-level singleton caches for performance optimization
+# ============================================================================
+import threading
+
+_GLOBAL_EMBEDDINGS = None
+_GLOBAL_VECTOR_STORES = None
+_LLM_CACHE = {}
+_CACHE_LOCK = threading.Lock()
+
+
+def get_embeddings():
+    """Get cached OllamaEmbeddings instance. Initializes on first call only."""
+    global _GLOBAL_EMBEDDINGS
+    if _GLOBAL_EMBEDDINGS is None:
+        with _CACHE_LOCK:
+            if _GLOBAL_EMBEDDINGS is None:
+                logger.info("Initializing OllamaEmbeddings (first call only)")
+                _GLOBAL_EMBEDDINGS = OllamaEmbeddings(model="nomic-embed-text:v1.5")
+    return _GLOBAL_EMBEDDINGS
+
+
+def get_vector_stores():
+    """Get cached vector stores. Loads from disk on first call only."""
+    global _GLOBAL_VECTOR_STORES
+    if _GLOBAL_VECTOR_STORES is None:
+        with _CACHE_LOCK:
+            if _GLOBAL_VECTOR_STORES is None:
+                logger.info("Loading vector stores (first call only)")
+                embeddings = get_embeddings()
+                _GLOBAL_VECTOR_STORES = {
+                    'chunks': FAISS.load_local("chunks_vector_store", embeddings, allow_dangerous_deserialization=True),
+                    'summaries': FAISS.load_local("chapter_summaries_vector_store", embeddings, allow_dangerous_deserialization=True),
+                    'quotes': FAISS.load_local("book_quotes_vectorstore", embeddings, allow_dangerous_deserialization=True),
+                }
+                logger.info("Vector stores loaded successfully")
+    return _GLOBAL_VECTOR_STORES
+
+
+def get_retrievers():
+    """Get retriever objects. Uses cached vector stores."""
+    vs = get_vector_stores()
+    return {
+        'chunks': vs['chunks'].as_retriever(search_kwargs={"k": 3}),
+        'summaries': vs['summaries'].as_retriever(search_kwargs={"k": 3}),
+        'quotes': vs['quotes'].as_retriever(search_kwargs={"k": 3}),
+    }
+
+
+def get_llm(model="minimaxai/minimax-m3", temperature=0.7, base_url="https://integrate.api.nvidia.com/v1") -> ChatNVIDIA:
+    """Get cached ChatNVIDIA instance. Creates once per unique model/temperature combo."""
+    global _LLM_CACHE
+    cache_key = f"{model}_{temperature}"
+    if cache_key not in _LLM_CACHE:
+        with _CACHE_LOCK:
+            if cache_key not in _LLM_CACHE:
+                logger.info(f"Creating ChatNVIDIA instance for {model} (first call only)")
+                _LLM_CACHE[cache_key] = ChatGoogleGenerativeAI(
+            model="gemma-4-31b-it"
+            )
+    return _LLM_CACHE[cache_key]
+
+
+class EmbeddingCache:
+    """Thread-safe cache for question embeddings."""
+    def __init__(self):
+        self.cache = {}
+        self.lock = threading.Lock()
+
+    def embed_query(self, text):
+        """Get cached embedding or generate if not cached."""
+        text_hash = hash(text)
+        with self.lock:
+            if text_hash not in self.cache:
+                logger.debug(f"Embedding query (cache miss): {text[:50]}")
+                self.cache[text_hash] = get_embeddings().embed_query(text)
+            else:
+                logger.debug(f"Using cached embedding (cache hit)")
+        return self.cache[text_hash]
+
+
+# ============================================================================
+# END PHASE 1
+# ============================================================================
+
+# ============================================================================
+# PHASE 2: Parallelization and confidence-based early exit
+# ============================================================================
+import asyncio
+
+async def retrieve_all_contexts_parallel(question):
+    """Fetch all 3 retrieval sources in parallel using asyncio. Returns dict with all contexts."""
+    retrievers = get_retrievers()
+    try:
+        logger.debug("Starting parallel retrieval of all 3 sources")
+        results = await asyncio.gather(
+            asyncio.to_thread(retrievers['chunks'].invoke, question),
+            asyncio.to_thread(retrievers['summaries'].invoke, question),
+            asyncio.to_thread(retrievers['quotes'].invoke, question),
+        )
+        logger.info("Parallel retrieval completed")
+        return {
+            'chunks': results[0],
+            'summaries': results[1],
+            'quotes': results[2]
+        }
+    except Exception as e:
+        logger.error(f"Error in parallel retrieval: {str(e)}", exc_info=True)
+        raise
+
+
+def evaluate_answer_confidence(answer_text: str, context: str) -> float:
+    """Evaluate confidence score of answer based on context presence. Returns 0.0-1.0."""
+    if not answer_text or not context:
+        return 0.0
+
+    answer_lower = answer_text.lower()
+    context_lower = context.lower()
+
+    words = answer_lower.split()
+    matched_words = sum(1 for word in words if word in context_lower)
+    confidence = min(1.0, matched_words / max(len(words), 1) * 0.9)
+
+    logger.debug(f"Answer confidence: {confidence:.2f} ({matched_words}/{len(words)} words in context)")
+    return confidence
+
+
+def check_grounding(answer_text: str, context: str) -> bool:
+    """Check if answer is grounded in context. Returns boolean."""
+    if not answer_text or not context:
+        return False
+
+    answer_lower = answer_text.lower()
+    context_lower = context.lower()
+
+    words = answer_lower.split()
+    grounding_threshold = 0.3
+    matched_words = sum(1 for word in words if len(word) > 3 and word in context_lower)
+
+    is_grounded = matched_words / max(len([w for w in words if len(w) > 3]), 1) > grounding_threshold
+    logger.debug(f"Answer grounding: {is_grounded}")
+    return is_grounded
+
+
+# ============================================================================
+# END PHASE 2
+# ============================================================================
+
+# ============================================================================
+# PHASE 3: Advanced optimizations (fast embeddings, model selection, caching)
+# ============================================================================
+from time import time
+from functools import lru_cache
+
+_FAST_EMBEDDINGS = None
+
+
+def get_fast_embeddings():
+    """Get cached fast embeddings using sentence-transformers. Much faster than OllamaEmbeddings."""
+    global _FAST_EMBEDDINGS
+    if _FAST_EMBEDDINGS is None:
+        try:
+            from langchain_community.embeddings import HuggingFaceEmbeddings
+            logger.info("Initializing fast embeddings with sentence-transformers (first call only)")
+            _FAST_EMBEDDINGS = HuggingFaceEmbeddings(
+                model_name="sentence-transformers/all-MiniLM-L6-v2"
+            )
+        except Exception as e:
+            logger.warning(f"Fast embeddings unavailable: {e}, falling back to OllamaEmbeddings")
+            _FAST_EMBEDDINGS = get_embeddings()
+
+    return _FAST_EMBEDDINGS
+
+
+class RequestCache:
+    """Thread-safe LRU cache for question embeddings and responses. Phase 3 optimization."""
+
+    def __init__(self, max_size=1000, ttl_seconds=3600):
+        self.cache = {}
+        self.access_times = {}
+        self.max_size = max_size
+        self.ttl_seconds = ttl_seconds
+        self.lock = threading.Lock()
+
+    def get_cached_response(self, question_hash: int, similarity_threshold: float = 0.95):
+        """Check if similar question was answered recently."""
+        with self.lock:
+            current_time = time()
+
+            for cached_hash, (response, timestamp) in list(self.cache.items()):
+                if current_time - timestamp > self.ttl_seconds:
+                    del self.cache[cached_hash]
+                    del self.access_times[cached_hash]
+                    continue
+
+                if abs(cached_hash - question_hash) / max(abs(cached_hash), 1) < (1 - similarity_threshold):
+                    logger.debug(f"Cache hit for similar question")
+                    self.access_times[cached_hash] = current_time
+                    return response
+
+        return None
+
+    def cache_response(self, question_hash: int, response: str):
+        """Cache a response for a question."""
+        with self.lock:
+            if len(self.cache) >= self.max_size:
+                lru_key = min(self.access_times.keys(), key=lambda k: self.access_times[k])
+                del self.cache[lru_key]
+                del self.access_times[lru_key]
+                logger.debug(f"Evicted LRU cached entry")
+
+            self.cache[question_hash] = (response, time())
+            self.access_times[question_hash] = time()
+
+
+_REQUEST_CACHE = RequestCache()
+
+
+# ============================================================================
+# END PHASE 3
+# ============================================================================
 
 def create_retrievers():
     """Create and return retrievers from vector stores."""
@@ -74,7 +304,10 @@ def retrieve_context_per_question(state:dict):
     try:
         logger.debug(f"retrieve_context_per_question called with question: {state.get('question', 'N/A')[:50]}")
         question = state['question']
-        chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
+        retrievers = get_retrievers()
+        chunks_retriever = retrievers['chunks']
+        chapters_retriever = retrievers['summaries']
+        book_quotes_retriever = retrievers['quotes']
 
         # Retrieve relevant documents
         logger.info("Retrieving relevant chunks...")
@@ -112,12 +345,8 @@ def keep_only_relevant_context_chain():
         relevant_content:str = Field(description="The relevant content from the retrieved documents that is relevant to the query.")
     
     keep_only_relevant_context_prompt = PromptTemplate(template=only_relevant_context_prompt_template, input_variables=["query", "retrieved_docs"])
-    keep_only_relevent_context_llm = ChatOpenAI(
-        model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key  
-    )   
-    only_relevant_context_chain = keep_only_relevant_context_prompt | keep_only_relevent_context_llm.with_structured_output(KeepReleventContext)
+    keep_only_relevent_context_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)   
+    only_relevant_context_chain = keep_only_relevant_context_prompt | keep_only_relevent_context_llm.with_structured_output(KeepReleventContext, method="json_schema")
     return only_relevant_context_chain
     
     
@@ -169,11 +398,7 @@ def keep_only_relevant_content(state):
 def build_questions_using_chain_of_thoughts_chain():
     class QuestionAnswerFromContext(BaseModel):
         answer_based_on_content: str = Field(description="generates an answer to a query based on a given context.")
-    question_answer_from_context_llm = ChatOpenAI(
-        model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key  
-    )
+    question_answer_from_context_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
 
 
     question_answer_cot_prompt_template = """ 
@@ -224,7 +449,7 @@ def build_questions_using_chain_of_thoughts_chain():
         template=question_answer_cot_prompt_template,
         input_variables=["context", "question"],
     )
-    question_answer_from_context_cot_chain = question_answer_from_context_cot_prompt | question_answer_from_context_llm.with_structured_output(QuestionAnswerFromContext)
+    question_answer_from_context_cot_chain = question_answer_from_context_cot_prompt | question_answer_from_context_llm.with_structured_output(QuestionAnswerFromContext, method="json_schema")
     return question_answer_from_context_cot_chain
 
 def generate_answer_from_context(state):
@@ -261,7 +486,19 @@ def generate_answer_from_context(state):
         answer = output.answer_based_on_content
         logger.info(f"Generated answer: {answer[:100]}...")
         print(f'answer before checking hallucination: {answer}')
-        return {"answer": answer, "context": context, "question": question}
+
+        # Phase 2: Add confidence and grounding scoring
+        confidence = evaluate_answer_confidence(answer, context)
+        is_grounded = check_grounding(answer, context)
+
+        return {
+            "answer": answer,
+            "context": context,
+            "question": question,
+            "confidence": confidence,
+            "is_grounded": is_grounded,
+            "replan_count": 0
+        }
     except KeyError as e:
         logger.error(f"Missing key in state: {str(e)}", exc_info=True)
         raise
@@ -280,18 +517,14 @@ def build_is_relevant_content_chain():
 
     # is_relevant_json_parser = JsonOutputParser(pydantic_object=Relevance)
     # is_relevant_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
-    is_relevant_llm = ChatOpenAI(
-       model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key  
-    )
+    is_relevant_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
 
     is_relevant_content_prompt = PromptTemplate(
         template=is_relevant_content_prompt_template,
         input_variables=["query", "context"],
         # partial_variables={"format_instructions": is_relevant_json_parser.get_format_instructions()},
     )
-    is_relevant_content_chain = is_relevant_content_prompt | is_relevant_llm.with_structured_output(Relevance)
+    is_relevant_content_chain = is_relevant_content_prompt | is_relevant_llm.with_structured_output(Relevance, method="json_schema")
     return is_relevant_content_chain
 
 def is_relevant_content(state):
@@ -328,11 +561,7 @@ def create_is_grounded_on_facts_chain():
         """
         grounded_on_facts: bool = Field(description="Answer is grounded in the facts, 'yes' or 'no'")
 
-    is_grounded_on_facts_llm = ChatOpenAI(
-        model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key
-        )
+    is_grounded_on_facts_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
     is_grounded_on_facts_prompt_template = """You are a fact-checker that determines if the given answer {answer} is grounded in the given context {context}
     you don't mind if it doesn't make sense, as long as it is grounded in the context.
     output a json containing the answer to the question, and appart from the json format don't output any additional text.
@@ -342,7 +571,7 @@ def create_is_grounded_on_facts_chain():
         template=is_grounded_on_facts_prompt_template,
         input_variables=["context", "answer"],
     )
-    is_grounded_on_facts_chain = is_grounded_on_facts_prompt | is_grounded_on_facts_llm.with_structured_output(is_grounded_on_facts)
+    is_grounded_on_facts_chain = is_grounded_on_facts_prompt | is_grounded_on_facts_llm.with_structured_output(is_grounded_on_facts, method="json_schema")
     return is_grounded_on_facts_chain
 
 def create_can_be_answered_chain():
@@ -362,12 +591,8 @@ def create_can_be_answered_chain():
     )
 
     # can_be_answered_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
-    can_be_answered_llm = ChatOpenAI(
-         model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key  
-    )
-    can_be_answered_chain = answer_question_prompt | can_be_answered_llm.with_structured_output(QuestionAnswer)
+    can_be_answered_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
+    can_be_answered_chain = answer_question_prompt | can_be_answered_llm.with_structured_output(QuestionAnswer, method="json_schema")
     return can_be_answered_chain
 
 def create_is_distilled_content_grounded_on_content_chain():
@@ -389,11 +614,7 @@ def create_is_distilled_content_grounded_on_content_chain():
     )
 
     # is_distilled_content_grounded_on_content_llm = ChatGroq(temperature=0, model_name="llama3-70b-8192", groq_api_key=groq_api_key, max_tokens=4000)
-    is_distilled_content_grounded_on_content_llm =ChatOpenAI(
-        model="openai/gpt-4.1",
-        base_url="https://models.github.ai/inference",
-        api_key=nvidia_key
-        )
+    is_distilled_content_grounded_on_content_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
 
     is_distilled_content_grounded_on_content_chain = is_distilled_content_grounded_on_content_prompt | is_distilled_content_grounded_on_content_llm.with_structured_output(IsDistilledContentGroundedOnContent)
     return is_distilled_content_grounded_on_content_chain
@@ -416,7 +637,9 @@ def is_distilled_content_grounded_on_content(state):
 
     print("Determining if the distilled content is grounded on the original context...")
     distilled_content = state["relevant_context"]
+    print("Distilled content:", distilled_content)
     original_context = state["context"]
+    print("Original context:", original_context)
 
     input_data = {
         "distilled_content": distilled_content,
@@ -442,7 +665,10 @@ def retrieve_chunks_context_per_question(state):
     """
     try:
         logger.debug("retrieve_chunks_context_per_question called")
-        chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
+        retrievers = get_retrievers()
+        chunks_retriever = retrievers['chunks']
+        chapters_retriever = retrievers['summaries']
+        book_quotes_retriever = retrievers['quotes']
         # Retrieve relevant documents
         logger.info("Retrieving relevant chunks...")
         print("Retrieving relevant chunks...")
@@ -466,7 +692,10 @@ def retrieve_chunks_context_per_question(state):
 
 
 def retrieve_summaries_context_per_question(state):
-    chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
+    retrievers = get_retrievers()
+    chunks_retriever = retrievers['chunks']
+    chapters_retriever = retrievers['summaries']
+    book_quotes_retriever = retrievers['quotes']
 
     print("Retrieving relevant chapter summaries...")
     question = state["question"]
@@ -482,7 +711,10 @@ def retrieve_summaries_context_per_question(state):
 
 def retrieve_book_quotes_context_per_question(state):
     question = state["question"]
-    chunks_retriever, chapters_retriever, book_quotes_retriever = create_retrievers()
+    retrievers = get_retrievers()
+    chunks_retriever = retrievers['chunks']
+    chapters_retriever = retrievers['summaries']
+    book_quotes_retriever = retrievers['quotes']
 
     print("Retrieving relevant book quotes...")
     docs_book_quotes = book_quotes_retriever.invoke(state["question"])
@@ -634,6 +866,11 @@ class PlanExecute(TypedDict):
     aggregated_context: str
     tool: str
     response: str
+    embedding_cache: 'EmbeddingCache'
+    # Phase 2 fields
+    confidence: float
+    is_grounded: bool
+    replan_count: int
 
 class Plan(BaseModel):
         """Plan to follow in future"""
@@ -656,12 +893,9 @@ def create_plan_chain():
         input_variables=["question"], 
         )
 
-    planner_llm = ChatOpenAI( model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key  
-    )
+    planner_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
 
-    planner = planner_prompt | planner_llm.with_structured_output(Plan)
+    planner = planner_prompt | planner_llm.with_structured_output(Plan, method="json_schema")
     return planner
 
 
@@ -684,9 +918,9 @@ def create_break_down_plan_chain():
         input_variables=["plan"],
     )
 
-    break_down_plan_llm = ChatOpenAI(model="z-ai/glm-5.2", base_url="https://integrate.api.nvidia.com/v1", temperature=0, api_key=nvidia_key)
+    break_down_plan_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.0)
 
-    break_down_plan_chain = break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan)
+    break_down_plan_chain = break_down_plan_prompt | break_down_plan_llm.with_structured_output(Plan, method="json_schema")
 
     return break_down_plan_chain
 
@@ -730,22 +964,22 @@ def create_replanner_chain():
         # partial_variables={"format_instructions": act_possible_results_parser.get_format_instructions()},
     )
 
-    replanner_llm = ChatOpenAI(model="z-ai/glm-5.2", base_url="https://integrate.api.nvidia.com/v1", temperature=0, api_key=nvidia_key)
+    replanner_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.0)
 
 
-    replanner = replanner_prompt | replanner_llm.with_structured_output(Plan)
+    replanner = replanner_prompt | replanner_llm.with_structured_output(Plan, method="json_schema")
     return replanner
 
 def create_task_handler_chain():
     tasks_handler_prompt_template = """You are a task handler that receives a task {curr_task} and have to decide with tool to use to execute the task.
     You have the following tools at your disposal:
-    retrieve_chunks: a tool that retrieves relevant information from a vector store of book chunks based on a given query.
+    1. retrieve_chunks: a tool that retrieves relevant information from a vector store of book chunks based on a given query.
     - use retrieve_chunks when you think the current task should search for information in the book chunks.
-    retrieve_summaries: a tool that retrieves relevant information from a vector store of chapter summaries based on a given query.
+    2. retrieve_summaries: a tool that retrieves relevant information from a vector store of chapter summaries based on a given query.
     - use retrieve_summaries when you think the current task should search for information in the chapter summaries.
-    retrieve_quotes: a tool that retrieves relevant information from a vector store of quotes from the book based on a given query.
+    3. retrieve_quotes: a tool that retrieves relevant information from a vector store of quotes from the book based on a given query.
     - use retrieve_quotes when you think the current task should search for information in the book quotes.
-    answer_from_context: a tool that answers a question from a given context.
+    4. answer_from_context: a tool that answers a question from a given context.
     - use answer_from_context ONLY when you the current task can be answered by the aggregated context {aggregated_context}
 
     you also receive the last tool used {last_tool}
@@ -753,8 +987,8 @@ def create_task_handler_chain():
 
     You also have the past steps {past_steps} that you can use to make decisions and understand the context of the task.
     You also have the initial user's question {question} that you can use to make decisions and understand the context of the task.
-    if you decide to use Tools A,B or C, output the query to be used for the tool and also output the relevant tool.
-    if you decide to use Tool D, output the question to be used for the tool, the context, and also that the tool to be used is Tool D.
+    if you decide to use Tools retrieve_chunks,retrieve_summaries or retrieve_quotes, output the query to be used for the tool and also output the relevant tool.
+    if you decide to use Tool answer_from_context, output the question to be used for the tool, the context, and also that the tool to be used is Tool answer_from_context.
 
     """
 
@@ -770,8 +1004,8 @@ def create_task_handler_chain():
         input_variables=["curr_task", "aggregated_context", "last_tool", "past_steps", "question"],
     )
 
-    task_handler_llm = ChatOpenAI(model="z-ai/glm-5.2", temperature=0, base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
-    task_handler_chain = task_handler_prompt | task_handler_llm.with_structured_output(TaskHandlerOutput)
+    task_handler_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.0)
+    task_handler_chain = task_handler_prompt | task_handler_llm.with_structured_output(TaskHandlerOutput, method="json_schema")
     return task_handler_chain
 
 def create_anonymize_question_chain():
@@ -801,7 +1035,7 @@ def create_anonymize_question_chain():
         partial_variables={"format_instructions": anonymize_question_parser.get_format_instructions()},
     )
 
-    anonymize_question_llm = ChatOpenAI(model="z-ai/glm-5.2", temperature=0, base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
+    anonymize_question_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.0)
     anonymize_question_chain = anonymize_question_prompt | anonymize_question_llm | anonymize_question_parser
     return anonymize_question_chain
 
@@ -823,11 +1057,8 @@ def create_deanonymize_plan_chain():
     )
     
 
-    de_anonymize_plan_llm = ChatOpenAI(model="z-ai/glm-5.2",
-        base_url="https://integrate.api.nvidia.com/v1",
-        api_key=nvidia_key
-        )
-    de_anonymize_plan_chain = de_anonymize_plan_prompt | de_anonymize_plan_llm.with_structured_output(DeAnonymizePlan)
+    de_anonymize_plan_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.7)
+    de_anonymize_plan_chain = de_anonymize_plan_prompt | de_anonymize_plan_llm.with_structured_output(DeAnonymizePlan, method="json_schema")
     return de_anonymize_plan_chain
 
 def create_can_be_answered_already_chain():
@@ -847,8 +1078,8 @@ def create_can_be_answered_already_chain():
         input_variables=["question","context"],
     )
 
-    can_be_answered_already_llm = ChatOpenAI(model="z-ai/glm-5.2", temperature=0, base_url="https://integrate.api.nvidia.com/v1", api_key=nvidia_key)
-    can_be_answered_already_chain = can_be_answered_already_prompt | can_be_answered_already_llm.with_structured_output(CanBeAnsweredAlready)
+    can_be_answered_already_llm = get_llm(model="minimaxai/minimax-m3", temperature=0.0)
+    can_be_answered_already_chain = can_be_answered_already_prompt | can_be_answered_already_llm.with_structured_output(CanBeAnsweredAlready, method="json_schema")
     return can_be_answered_already_chain
 
 
@@ -876,10 +1107,8 @@ def run_task_handler_chain(state: PlanExecute):
         logger.debug("run_task_handler_chain called")
         state["curr_state"] = "task_handler"
         logger.info("Current plan:")
-        print("the current plan is:")
-        print(state["plan"])
         logger.debug(f"Plan: {state['plan']}")
-        print("--------------------")
+        # print("--------------------")
 
         if "past_steps" not in state or state['past_steps'] is None:
             state["past_steps"] = []
@@ -978,21 +1207,21 @@ def run_qualitative_chunks_retrieval_workflow(state):
 
         inputs = {"question": question}
         logger.debug("Streaming workflow...")
+        relevant_content = ""
         for output in qualitative_chunks_retrieval_workflow_app.stream(inputs):
-            for _, _ in output.items():
-                pass
+            node_output = list(output.values())[0] if output else {}
+            if isinstance(node_output, dict) and "relevant_context" in node_output:
+                relevant_content = node_output["relevant_context"]
             print("--------------------")
 
         if "aggregated_context" not in state or state["aggregated_context"] is None:
             state["aggregated_context"] = ""
             logger.debug("Initialized aggregated_context")
 
-        state["aggregated_context"] += output['relevant_context']
-        logger.info(f"Updated aggregated_context to {len(state['aggregated_context'])} characters")
+        if relevant_content:
+            state["aggregated_context"] += relevant_content
+            logger.info(f"Updated aggregated_context to {len(state['aggregated_context'])} characters")
         return state
-    except KeyError as e:
-        logger.error(f"Missing key in state: {str(e)}", exc_info=True)
-        raise
     except Exception as e:
         logger.error(f"Error in run_qualitative_chunks_retrieval_workflow: {str(e)}", exc_info=True)
         raise
@@ -1010,13 +1239,16 @@ def run_qualitative_summaries_retrieval_workflow(state):
     print("Running the qualitative summaries retrieval workflow...")
     question = state["query_to_retrieve_or_answer"]
     inputs = {"question": question}
+    relevant_content = ""
     for output in qualitative_summaries_retrieval_workflow_app.stream(inputs):
-        for _, _ in output.items():
-            pass 
+        node_output = list(output.values())[0] if output else {}
+        if isinstance(node_output, dict) and "relevant_context" in node_output:
+            relevant_content = node_output["relevant_context"]
         print("--------------------")
     if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
-    state["aggregated_context"] += output['relevant_context']
+    if relevant_content:
+        state["aggregated_context"] += relevant_content
     return state
 
 
@@ -1033,13 +1265,16 @@ def run_qualitative_book_quotes_retrieval_workflow(state):
     print("Running the qualitative book quotes retrieval workflow...")
     question = state["query_to_retrieve_or_answer"]
     inputs = {"question": question}
+    relevant_content = ""
     for output in qualitative_book_quotes_retrieval_workflow_app.stream(inputs):
-        for _, _ in output.items():
-            pass 
+        node_output = list(output.values())[0] if output else {}
+        if isinstance(node_output, dict) and "relevant_context" in node_output:
+            relevant_content = node_output["relevant_context"]
         print("--------------------")
     if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
-    state["aggregated_context"] += output['relevant_context']
+    if relevant_content:
+        state["aggregated_context"] += relevant_content
     return state
    
 
@@ -1198,6 +1433,23 @@ def break_down_plan_step(state: PlanExecute):
     return state
 
 
+def should_replan(state: PlanExecute):
+    """Conditional routing: determine if replanning is needed based on confidence."""
+    confidence = state.get('confidence', 0.0)
+    is_grounded = state.get('is_grounded', False)
+    replan_count = state.get('replan_count', 0)
+
+    if replan_count >= 2:
+        logger.warning(f"Max replan iterations (2) reached, forcing exit")
+        return "can_be_answered"
+
+    if confidence > 0.85 and is_grounded:
+        logger.info(f"High confidence answer ({confidence:.2f}), skipping replan")
+        return "can_be_answered"
+    else:
+        logger.info(f"Low confidence ({confidence:.2f}), will replan")
+        return "replan"
+
 
 def replan_step(state: PlanExecute):
     """
@@ -1252,6 +1504,13 @@ def create_agent():
         logger.info("Starting create_agent")
         agent_workflow = StateGraph(PlanExecute)
         logger.debug("Created StateGraph")
+
+        # Initialize Phase 1 singleton caches (first call only, then reused)
+        logger.info("Initializing Phase 1 caches...")
+        _ = get_embeddings()  # Initialize embeddings
+        _ = get_vector_stores()  # Initialize vector stores
+        _ = get_retrievers()  # Initialize retrievers
+        logger.info("Phase 1 caches initialized")
 
         # Add the anonymize node
         agent_workflow.add_node("anonymize_question", anonymize_queries)
@@ -1323,8 +1582,9 @@ def create_agent():
         agent_workflow.add_edge("retrieve_summaries", "replan")
         agent_workflow.add_edge("retrieve_book_quotes", "replan")
 
-        # After answering we go to replan
+        # After answering we go to replan (original sequential flow - Phase 1 keeps flow unchanged)
         agent_workflow.add_edge("answer", "replan")
+        logger.debug("Added edge from answer to replan")
 
         # After replanning we check if the question can be answered
         agent_workflow.add_conditional_edges("replan", can_be_answered, {"can_be_answered_already": "get_final_answer", "cannot_be_answered_yet": "break_down_plan"})
