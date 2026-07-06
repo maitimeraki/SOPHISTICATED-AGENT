@@ -467,7 +467,7 @@ def generate_answer_from_context(state):
     try:
         logger.debug(f"generate_answer_from_context called")
         question = state["question"]
-        context = state["relevant_context"]
+        context = state.get("relevant_context") or state.get("context")
         logger.debug(f"Question: {question[:50]}, Context length: {len(context)}")
 
         input_data = {
@@ -1292,13 +1292,16 @@ def run_qualtative_answer_workflow(state):
     question = state["query_to_retrieve_or_answer"]
     context = state["curr_context"]
     inputs = {"question": question, "context": context}
+    answer = ""
     for output in qualitative_answer_workflow_app.stream(inputs):
-        for _, _ in output.items():
-            pass 
+        node_output = list(output.values())[0] if output else {}
+        if isinstance(node_output, dict) and "answer" in node_output:
+            answer = node_output["answer"]
         print("--------------------")
     if "aggregated_context" not in state or state["aggregated_context"] is None:
         state["aggregated_context"] = ""
-    state["aggregated_context"] += output["answer"]
+    if answer:
+        state["aggregated_context"] += answer
     return state
 
 
@@ -1316,11 +1319,13 @@ def run_qualtative_answer_workflow_for_final_answer(state):
     question = state["question"]
     context = state["aggregated_context"]
     inputs = {"question": question, "context": context}
+    answer = ""
     for output in qualitative_answer_workflow_app.stream(inputs):
-        for _, value in output.items():
-            pass  
+        node_output = list(output.values())[0] if output else {}
+        if isinstance(node_output, dict) and "answer" in node_output:
+            answer = node_output["answer"]
         print("--------------------")
-    state["response"] = value
+    state["response"] = answer
     return state
 
 @mlflow.trace(span_type="anonymize_queries")
