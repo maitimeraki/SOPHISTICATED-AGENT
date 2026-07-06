@@ -14,7 +14,7 @@ A sophisticated LLM-powered agent that processes complex user queries through a 
 - [Architecture & Structure](#architecture--structure)
 - [Installation & Setup](#installation--setup)
 - [How to Use](#how-to-use)
-- [Project Structure](#project-structure)
+- [Assets](#assets)
 - [Configuration](#configuration)
 - [Development & Testing](#development--testing)
 - [Technologies Used](#technologies-used)
@@ -105,11 +105,11 @@ Final Answer (logged to MLflow)
 
 **Three-Tier Vector Store System:**
 
-| Vector Store | Purpose | Use Case |
-|---|---|---|
-| `chunks_vector_store` | General segmented content | Broad context retrieval |
-| `chapter_summaries_vector_store` | High-level chapter summaries | Quick overviews |
-| `book_quotes_vectorstore` | Specific, memorable passages | Exact quote retrieval |
+| Vector Store                     | Purpose                      | Use Case                |
+| -------------------------------- | ---------------------------- | ----------------------- |
+| `chunks_vector_store`            | General segmented content    | Broad context retrieval |
+| `chapter_summaries_vector_store` | High-level chapter summaries | Quick overviews         |
+| `book_quotes_vectorstore`        | Specific, memorable passages | Exact quote retrieval   |
 
 ### Technology Stack
 
@@ -234,95 +234,11 @@ The app will open in your browser at `http://localhost:8501`
 
 ---
 
-## Project Structure
+## Assets
 
-```
-SOPHISTICATED-AGENT/
-├── README.md                           # Project documentation (this file)
-├── CLAUDE.md                           # Development guidelines for Claude AI
-├── requirements.txt                    # Python dependencies
-├── .env.example                        # Example environment variables
-├── .gitignore                          # Git ignore rules
-│
-├── sophisticated_agent.py              # Main agent orchestration (Streamlit app)
-├── functions_for_pipeline.py           # Utility functions for RAG pipeline
-│
-├── vector_stores/                      # Vector store management
-│   ├── __init__.py
-│   ├── create_vector_stores.py         # Initialize and populate vector stores
-│   └── retrieval.py                    # Retrieval functions for each store
-│
-├── data/                               # Raw data and documents
-│   ├── documents/                      # PDF files and text documents
-│   ├── processed/                      # Processed chunks and embeddings
-│   └── vector_store_data/              # Persisted vector stores
-│
-├── notebooks/                          # Jupyter notebooks for exploration
-│   ├── exploration.ipynb               # Data exploration
-│   ├── vector_store_analysis.ipynb     # Vector store testing
-│   └── pipeline_testing.ipynb          # Pipeline validation
-│
-├── tests/                              # Unit and integration tests
-│   ├── __init__.py
-│   ├── test_functions_pipeline.py      # Tests for pipeline functions
-│   ├── test_agent.py                   # Agent workflow tests
-│   └── test_retrieval.py               # Retrieval logic tests
-│
-├── config/                             # Configuration files
-│   ├── settings.py                     # Application settings
-│   └── prompts.py                      # LLM prompt templates
-│
-└── logs/                               # Application logs
-    ├── agent.log
-    └── mlflow_runs/
-```
+![Front asset](assets/front.png)
 
 ---
-
-## Configuration
-
-### Key Configuration Files
-
-**settings.py** - Core application settings:
-```python
-# Vector store configurations
-CHUNK_SIZE = 1000
-CHUNK_OVERLAP = 200
-EMBEDDING_MODEL = "text-embedding-3-small"
-
-# LLM settings
-LLM_MODEL = "gpt-4"
-TEMPERATURE = 0.7
-MAX_TOKENS = 2000
-
-# MLflow settings
-MLFLOW_TRACKING_URI = "http://localhost:5000"
-EXPERIMENT_NAME = "sophisticated-agent"
-```
-
-**prompts.py** - Customizable prompt templates:
-```python
-ANONYMIZE_PROMPT = "Remove PII from this query: {query}"
-PLANNER_PROMPT = "Create a plan for: {query}"
-# ... more prompts
-```
-
----
-
-## Development & Testing
-
-### Running Tests
-
-```bash
-# Run all tests
-pytest tests/
-
-# Run specific test file
-pytest tests/test_agent.py -v
-
-# Run with coverage
-pytest --cov=. tests/
-```
 
 ### Testing Individual Functions
 
@@ -337,6 +253,7 @@ python
 ### Debug Mode
 
 Set environment variable for verbose logging:
+
 ```bash
 export LOG_LEVEL=DEBUG
 streamlit run sophisticated_agent.py
@@ -345,6 +262,7 @@ streamlit run sophisticated_agent.py
 ### MLflow Integration
 
 Every execution automatically logs:
+
 - 📊 Query metadata and parameters
 - ⏱️ Execution time per step
 - 🔤 Token usage (input/output)
@@ -355,16 +273,16 @@ Every execution automatically logs:
 
 ## Technologies Used
 
-| Component | Technology | Version |
-|-----------|-----------|---------|
-| **Orchestration** | LangChain, LangGraph | Latest |
-| **LLM** | OpenAI GPT-4 | Latest |
-| **UI** | Streamlit | ≥1.28 |
-| **Embeddings** | OpenAI Embeddings | Latest |
-| **Vector Store** | FAISS / Chroma | Latest |
-| **PDF Processing** | PyPDF2, pdfplumber | Latest |
-| **Experiment Tracking** | MLflow | ≥2.0 |
-| **Language** | Python | 3.8+ |
+| Component               | Technology           | Version |
+| ----------------------- | -------------------- | ------- |
+| **Orchestration**       | LangChain, LangGraph | Latest  |
+| **LLM**                 | OpenAI GPT-4         | Latest  |
+| **UI**                  | Streamlit            | ≥1.28   |
+| **Embeddings**          | OpenAI Embeddings    | Latest  |
+| **Vector Store**        | FAISS / Chroma       | Latest  |
+| **PDF Processing**      | PyPDF2, pdfplumber   | Latest  |
+| **Experiment Tracking** | MLflow               | ≥2.0    |
+| **Language**            | Python               | 3.8+    |
 
 ---
 
@@ -372,32 +290,36 @@ Every execution automatically logs:
 
 ### State Graph Nodes
 
-| Node | Function | Output |
-|------|----------|--------|
-| `anonymize_question` | Removes PII from query | Anonymized query string |
-| `planner` | Creates response strategy | High-level plan |
-| `de_anonymize_plan` | Restores context | Enriched plan |
-| `break_down_plan` | Decomposes to tasks | Task list |
-| `task_handler` | Executes tasks | Task results |
-| `retrieve_from_chunks` | Searches chunk store | Relevant passages |
-| `retrieve_from_summaries` | Searches summary store | Chapter summaries |
-| `retrieve_from_quotes` | Searches quote store | Relevant quotes |
-| `answer` | Generates final response | User-facing answer |
+| Node                      | Function                  | Output                  |
+| ------------------------- | ------------------------- | ----------------------- |
+| `anonymize_question`      | Removes PII from query    | Anonymized query string |
+| `planner`                 | Creates response strategy | High-level plan         |
+| `de_anonymize_plan`       | Restores context          | Enriched plan           |
+| `break_down_plan`         | Decomposes to tasks       | Task list               |
+| `task_handler`            | Executes tasks            | Task results            |
+| `retrieve_from_chunks`    | Searches chunk store      | Relevant passages       |
+| `retrieve_from_summaries` | Searches summary store    | Chapter summaries       |
+| `retrieve_from_quotes`    | Searches quote store      | Relevant quotes         |
+| `answer`                  | Generates final response  | User-facing answer      |
 
 ---
 
 ## Common Issues & Troubleshooting
 
 ### Issue: MLflow Server Not Running
+
 **Solution**: Start MLflow with `mlflow ui` and verify it's accessible at `http://localhost:5000`
 
 ### Issue: Vector Stores Not Found
+
 **Solution**: Run `python vector_stores/create_vector_stores.py` to initialize vector stores from documents
 
 ### Issue: API Key Errors
+
 **Solution**: Verify your `.env` file contains valid `OPENAI_API_KEY`
 
 ### Issue: Slow Retrieval
+
 **Solution**: Check vector store indices are properly built; consider reducing chunk size in `settings.py`
 
 ---
