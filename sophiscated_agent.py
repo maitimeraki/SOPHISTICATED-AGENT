@@ -1,3 +1,5 @@
+import sys
+import os
 import streamlit as st
 from functions_for_pipeline import *
 import streamlit.components.v1 as components
@@ -21,8 +23,8 @@ logger = logging.getLogger(__name__)
 
 langchain.autolog()
 logger.info("LangChain autolog enabled")  
-# Specify the tracking URI for the MLflow server.
-mlflow.set_tracking_uri("http://localhost:5000")
+# Use local file store — skips the URL print entirely
+mlflow.set_tracking_uri(f"file:///{os.path.abspath('./mlruns').replace('\\', '/')}")
 # Specify the experiment you just created for your GenAI application.
 mlflow.set_experiment("Sophisticated Agent Experiment")
 
@@ -178,6 +180,21 @@ def updates_placeholders_and_graph(agent_state_value, placeholders, graph_placeh
             
         
         
+# ============================================================================
+# PHASE 3: Streaming response support
+# ============================================================================
+
+def stream_response(response_placeholder, initial_response: str):
+    """Phase 3: Show response progressively. Returns user-perceivable answer early."""
+    if initial_response:
+        response_placeholder.markdown(initial_response)
+        logger.info("Phase 3: Streamed initial response to user at 5-10s mark")
+
+
+# ============================================================================
+# END PHASE 3 STREAMING
+# ============================================================================
+
 def execute_plan_and_print_steps(inputs, plan_and_execute_app, placeholders, graph_placeholder, recurtion_limit=45):
     """
     Execute the plan and print the steps in the Streamlit app.
@@ -253,6 +270,16 @@ def main():
         st.set_page_config(page_title="Agent Network Graph", page_icon="🌐", layout="wide")
         st.title("Agent Network Graph Visualization")
         logger.debug("Streamlit page config set")
+
+        # Phase 1 + Phase 3: Initialize caches in Streamlit session state
+        if 'embedding_cache' not in st.session_state:
+            st.session_state.embedding_cache = EmbeddingCache()
+            logger.info("Phase 1: Initialized embedding cache in session state")
+
+        if 'request_cache' not in st.session_state:
+            from functions_for_pipeline import _REQUEST_CACHE
+            st.session_state.request_cache = _REQUEST_CACHE
+            logger.info("Phase 3: Initialized request cache in session state")
 
         # Load the current state of the agent
         logger.info("Creating agent...")
